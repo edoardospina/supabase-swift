@@ -249,16 +249,22 @@ public actor AuthClient {
   }
 
   deinit {
-    // Grab the session manager before dropping the dependencies entry, and capture only it in the
-    // task below, capturing `self` would resurrect this client while it is being deallocated.
+    // Capture only the id and the session manager in the task below: capturing `self` would
+    // resurrect this client while it is being deallocated.
+    let clientID = clientID
     let sessionManager = Dependencies.instances.value[clientID]?.sessionManager
-
-    Dependencies.instances.withValue { $0.removeValue(forKey: clientID) }
 
     // The auto-refresh loop retains the session manager, so it keeps ticking forever unless it is
     // explicitly stopped. `observeAppLifecycleChanges()` only stops it when the app resigns active,
     // which never happens for short-lived clients, or when auto-refresh was started manually.
-    Task { await sessionManager?.stopAutoRefresh() }
+    //
+    // The entry is removed only once the loop and every refresh in flight have ended: a tick
+    // reads `Dependencies[clientID]`, which traps on a missing entry, so removing it first lets a
+    // tick scheduled before the stop crash the process.
+    Task {
+      await sessionManager?.retire()
+      Dependencies.instances.withValue { _ = $0.removeValue(forKey: clientID) }
+    }
   }
 
   #if canImport(ObjectiveC) && canImport(Combine)

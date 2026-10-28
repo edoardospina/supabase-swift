@@ -116,4 +116,37 @@ struct AuthClientMultipleInstancesTests {
 
     #expect(isAutoRefreshRunning == false)
   }
+
+  // A client dropped right after its auto-refresh loop started must not leave a tick running
+  // against a dependencies entry that is already gone: before the fix the tick's first
+  // `Dependencies[clientID]` read hit `fatalError("Dependencies not found for id: …")`, which ends
+  // the test process rather than failing an expectation.
+  @Test
+  func droppingAClientWithAutoRefreshRunningNeverOutlivesItsDependencies() async {
+    let url = URL(string: "http://localhost:54321/auth")!
+
+    var clientIDs: [AuthClientID] = []
+    for _ in 0..<50 {
+      do {
+        let client = AuthClient(
+          configuration: AuthClient.Configuration(
+            url: url,
+            localStorage: InMemoryLocalStorage(),
+            logger: nil
+          )
+        )
+        clientIDs.append(client.clientID)
+        await client.startAutoRefresh()
+      }
+      await Task.yield()
+    }
+
+    var remaining = clientIDs.filter { Dependencies.instances.value[$0] != nil }
+    for _ in 0..<200 where !remaining.isEmpty {
+      try? await Task.sleep(nanoseconds: NSEC_PER_MSEC * 10)
+      remaining = remaining.filter { Dependencies.instances.value[$0] != nil }
+    }
+
+    #expect(remaining.isEmpty)
+  }
 }

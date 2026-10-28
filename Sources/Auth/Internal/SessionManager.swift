@@ -13,6 +13,9 @@ struct SessionManager: Sendable {
 
   var startAutoRefresh: @Sendable () async -> Void
   var stopAutoRefresh: @Sendable () async -> Void
+  /// Stops the auto-refresh loop and returns once it, and every refresh in flight, has ended, so
+  /// `AuthClient.deinit` can drop the dependencies entry nothing will read again.
+  var retire: @Sendable () async -> Void
 
   /// Whether the auto-refresh loop is currently scheduled.
   var isAutoRefreshRunning: @Sendable () async -> Bool
@@ -29,6 +32,7 @@ extension SessionManager {
       removeIfUnchanged: { await instance.removeIfUnchanged(since: $0) },
       startAutoRefresh: { await instance.startAutoRefreshToken() },
       stopAutoRefresh: { await instance.stopAutoRefreshToken() },
+      retire: { await instance.retire() },
       isAutoRefreshRunning: { await instance.isAutoRefreshTokenRunning() }
     )
   }
@@ -38,8 +42,7 @@ private actor LiveSessionManager {
   private var configuration: AuthClient.Configuration { Dependencies[clientID].configuration }
   private var sessionStorage: SessionStorage { Dependencies[clientID].sessionStorage }
   private var eventEmitter: AuthStateChangeEventEmitter { Dependencies[clientID].eventEmitter }
-  // Looked up leniently, as the session manager outlives its client while the auto-refresh loop is
-  // torn down from `AuthClient.deinit`, at which point the dependencies entry is already gone.
+  // Looked up leniently, as the session manager outlives its client and its dependencies entry.
   private var logger: (any SupabaseLogger)? { Dependencies.instances.value[clientID]?.logger }
   private var api: APIClient { Dependencies[clientID].api }
 
@@ -174,6 +177,18 @@ private actor LiveSessionManager {
     logger?.debug("stop auto refresh token")
     startAutoRefreshTokenTask?.cancel()
     startAutoRefreshTokenTask = nil
+  }
+
+  // The loop and a refresh task are unstructured, so neither ends with the client: each reads
+  // `Dependencies[clientID]` after its awaits. Awaiting them here, while the entry still exists,
+  // is what lets the caller remove it safely. Nothing the loop runs calls back into this method.
+  func retire() async {
+    let loop = startAutoRefreshTokenTask
+    stopAutoRefreshToken()
+    await loop?.value
+    for refresh in inFlightRefreshes.values {
+      _ = try? await refresh.value
+    }
   }
 
   func isAutoRefreshTokenRunning() -> Bool {
